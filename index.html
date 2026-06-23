@@ -27,17 +27,51 @@ input,select,textarea,button{font-family:inherit;}
 const {useState,useEffect,useRef,useCallback}=React;
 
 // ── Storage ───────────────────────────────────────────────────────────────────
-const PROJ_KEY="np-projects",INV_KEY="np-inventory",WISH_KEY="np-wishlist",KEY_KEY="np-apikey",PW_KEY="np-pw-hash";
+const KEY_KEY="np-apikey",PW_KEY="np-pw-hash";
+const SUPA_URL="https://zflklajzshywpzmsovue.supabase.co";
+const SUPA_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpmbGtsYWp6c2h5d3B6bXNvdnVlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNjM5NDQsImV4cCI6MjA5NzczOTk0NH0.1HrslW1So3DLsrVPaB5JkdtNBdrOaNgyF12FvjHS2IY";
 
 // Simple hash (not cryptographic, just obfuscation for a personal app)
 async function hashPin(pin){
   const buf=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(pin+"np-salt-81x"));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
 }
-function lsGet(k,def=[]){try{const v=localStorage.getItem(k);return v?JSON.parse(v):def;}catch{return def;}}
-function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){console.error(e);}}
+
+// localStorage fallbacks (used for apiKey and pw only)
 function lsStr(k){try{return localStorage.getItem(k)||"";}catch{return "";}}
 function lsStrSet(k,v){try{localStorage.setItem(k,v);}catch(e){console.error(e);}}
+
+// ── Supabase helpers ──────────────────────────────────────────────────────────
+// Each table stores one row per record: id (text PK) + data (jsonb) + updated_at
+// We store the entire collection as a single row with id="singleton"
+
+async function sbGet(table){
+  try{
+    const r=await fetch(`${SUPA_URL}/rest/v1/${table}?id=eq.singleton&select=data`,{
+      headers:{"apikey":SUPA_KEY,"Authorization":`Bearer ${SUPA_KEY}`}
+    });
+    if(!r.ok)return[];
+    const rows=await r.json();
+    return rows.length>0?rows[0].data:[];
+  }catch(e){console.error("sbGet error",e);return[];}
+}
+
+async function sbSet(table,data){
+  try{
+    const r=await fetch(`${SUPA_URL}/rest/v1/${table}`,{
+      method:"POST",
+      headers:{
+        "apikey":SUPA_KEY,
+        "Authorization":`Bearer ${SUPA_KEY}`,
+        "Content-Type":"application/json",
+        "Prefer":"resolution=merge-duplicates"
+      },
+      body:JSON.stringify({id:"singleton",data,updated_at:new Date().toISOString()})
+    });
+    if(!r.ok){const t=await r.text();console.error("sbSet error",t);}
+  }catch(e){console.error("sbSet error",e);}
+}
+// localStorage helpers now defined in storage section above
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const LINEN="#F5F0E8",LINEN_DARK="#EDE6D6",LINEN_BORDER="#D8CEBC";
@@ -734,15 +768,17 @@ function SettingsPanel({apiKey,setApiKey,projects,inventory,wishlist,onClose}){
   }
 
   const importRef=useRef();
-  function handleImport(e){
+  async function handleImport(e){
     const f=e.target.files[0];if(!f)return;
     const r=new FileReader();
-    r.onload=ev=>{
+    r.onload=async ev=>{
       try{
         const data=JSON.parse(ev.target.result);
-        if(data.projects)lsSet(PROJ_KEY,data.projects);
-        if(data.inventory)lsSet(INV_KEY,data.inventory);
-        if(data.wishlist)lsSet(WISH_KEY,data.wishlist);
+        const saves=[];
+        if(data.projects)saves.push(sbSet("projects",data.projects));
+        if(data.inventory)saves.push(sbSet("inventory",data.inventory));
+        if(data.wishlist)saves.push(sbSet("wishlist",data.wishlist));
+        await Promise.all(saves);
         alert("Import successful! Refresh the page to see your data.");
       }catch(err){alert("Import failed: "+err.message);}
     };
@@ -858,10 +894,22 @@ function FinishedObjectsSection({project,setProjects}){
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 function App(){
-  const [projects,setProjects]=useState(()=>lsGet(PROJ_KEY));
-  const [inventory,setInventory]=useState(()=>lsGet(INV_KEY));
-  const [wishlist,setWishlist]=useState(()=>lsGet(WISH_KEY));
+  const [projects,setProjects]=useState([]);
+  const [inventory,setInventory]=useState([]);
+  const [wishlist,setWishlist]=useState([]);
   const [apiKey,setApiKey]=useState(()=>lsStr(KEY_KEY));
+  const [loading,setLoading]=useState(true);
+  const [syncStatus,setSyncStatus]=useState("idle"); // idle | saving | saved | error
+
+  // Load all data from Supabase on mount
+  useEffect(()=>{
+    Promise.all([sbGet("projects"),sbGet("inventory"),sbGet("wishlist")]).then(([p,i,w])=>{
+      setProjects(p||[]);
+      setInventory(i||[]);
+      setWishlist(w||[]);
+      setLoading(false);
+    }).catch(()=>setLoading(false));
+  },[]);
   const [tab,setTab]=useState("projects");
   const [view,setView]=useState("list");
   const [activeId,setActiveId]=useState(null);
@@ -878,9 +926,18 @@ function App(){
   function openSettings(){setShowPwGate(true);}
   function onPwUnlock(){setShowPwGate(false);setShowSettings(true);}
 
-  useEffect(()=>lsSet(PROJ_KEY,projects),[projects]);
-  useEffect(()=>lsSet(INV_KEY,inventory),[inventory]);
-  useEffect(()=>lsSet(WISH_KEY,wishlist),[wishlist]);
+  // Save to Supabase whenever data changes (skip on initial empty load)
+  const isFirstRender=useRef(true);
+  useEffect(()=>{
+    if(loading)return;
+    if(isFirstRender.current){isFirstRender.current=false;return;}
+    setSyncStatus("saving");
+    Promise.all([sbSet("projects",projects),sbSet("inventory",inventory),sbSet("wishlist",wishlist)])
+      .then(()=>setSyncStatus("saved"))
+      .catch(()=>setSyncStatus("error"));
+    const t=setTimeout(()=>setSyncStatus("idle"),3000);
+    return()=>clearTimeout(t);
+  },[projects,inventory,wishlist]);
 
   function openNew(){setDraft(blankProject());setActiveId(null);setView("edit");}
   function openEdit(id){setDraft(JSON.parse(JSON.stringify(projects.find(x=>x.id===id))));setActiveId(id);setView("edit");}
@@ -929,11 +986,21 @@ function App(){
     );
   }
 
+  if(loading)return(
+    <div style={{minHeight:"100vh",background:LINEN,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"Georgia,serif",color:TEXT_SOFT,gap:16}}>
+      <div style={{fontSize:40}}>🪡</div>
+      <div style={{fontSize:16}}>Loading your projects...</div>
+    </div>
+  );
+
   const wrap=(children,showNew=false)=>(
     <div style={{minHeight:"100vh",background:LINEN,fontFamily:"Georgia, serif",color:TEXT,paddingBottom:60}}>
       {showPwGate&&<PasswordGate onUnlock={onPwUnlock}/>}
       {showSettings&&<SettingsPanel apiKey={apiKey} setApiKey={setApiKey} projects={projects} inventory={inventory} wishlist={wishlist} onClose={()=>setShowSettings(false)}/>}
       <TabBar showNew={showNew}/>
+      {syncStatus==="saving"&&<div style={{position:"fixed",bottom:16,right:16,background:PLUM,color:"#fff",fontFamily:"sans-serif",fontSize:12,padding:"6px 12px",borderRadius:20,zIndex:500,boxShadow:"0 2px 8px rgba(0,0,0,0.2)"}}>Saving...</div>}
+      {syncStatus==="saved"&&<div style={{position:"fixed",bottom:16,right:16,background:GREEN,color:"#fff",fontFamily:"sans-serif",fontSize:12,padding:"6px 12px",borderRadius:20,zIndex:500,boxShadow:"0 2px 8px rgba(0,0,0,0.2)"}}>✓ Saved</div>}
+      {syncStatus==="error"&&<div style={{position:"fixed",bottom:16,right:16,background:RED,color:"#fff",fontFamily:"sans-serif",fontSize:12,padding:"6px 12px",borderRadius:20,zIndex:500,boxShadow:"0 2px 8px rgba(0,0,0,0.2)"}}>⚠ Sync error</div>}
       <div style={{maxWidth:900,margin:"20px auto",padding:"0 16px"}}>{children}</div>
     </div>
   );
