@@ -405,7 +405,7 @@ function InventoryTab({inventory,setInventory,apiKey}){
   }
   function del(id){if(!confirm("Remove this thread?"))return;setInventory(prev=>prev.filter(t=>t.id!==id));setEditing(null);setDraft(null);}
   function upd(k,v){setDraft(d=>({...d,[k]:v}));}
-  function applyAutofill(s){setDraft(d=>({...d,brand:d.brand||s.brand||"",code:d.code||s.code||"",name:d.name||s.name||"",colorFamily:d.colorFamily||s.colorFamily||"",hex:d.hex==="cccccc"||!d.hex?s.hex||d.hex:d.hex,dyeLot:d.dyeLot||s.dyeLot||""}));}
+  function applyAutofill(s){setDraft(d=>({...d,brand:d.brand||s.brand||"",code:d.code||s.code||"",name:d.name||s.name||"",colorFamily:d.colorFamily||s.colorFamily||"",hex:d.hex==="#cccccc"||!d.hex?s.hex||d.hex:d.hex,dyeLot:d.dyeLot||s.dyeLot||""}));}
 
   if(editing)return(
     <div>
